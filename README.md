@@ -18,7 +18,7 @@ Günlük hareket uyarısı (🚩): kripto `%4`, diğerleri `%2`.
 
 Her enstrüman için kısa satırlar: fiyat ve günlük değişim; aylık / haftalık / günlük en üst ve en alt; muhtemel iğne üst ve alt; yön; AL / SAT ise giriş, SL, TP1, TP2. BEKLE ise "İşlem yok". 3 yıldızlı ABD / Avro verisi varsa üstte `⚠️ 3★ veri: saat TSİ ad` satırı (Forex Factory, `USD`/`EUR` + `High`; kaynak düşerse atlanır).
 
-Giriş, iğne bölgesinin hemen yanında, SL de o bölgenin hemen ötesinde (sıkı risk). TP1 / TP2 karşı taraftaki günlük, sonra haftalık (gerekirse aylık) uçlardır.
+Giriş (SL yakın), iğne bölgesinin hemen yanında, SL de o bölgenin hemen ötesindedir. Ayrıca Normal giriş (RR 0.5/2) yazılır: fiyat bu oranı veriyorsa mevcut fiyattan, yoksa (TP1+4·SL)/5 limit seviyesi. Normal giriş düşük lotladır. TP1 / TP2 karşı taraftaki günlük, sonra haftalık (gerekirse aylık) uçlardır.
 
 Saatler Türkiye saati (TSİ, Europe/Istanbul) iledir. Zamanlama: her 2 saatte bir (TSİ tek saatler: 01, 03, … 23).
 

@@ -639,6 +639,37 @@ def compute_instrument(
 # Message
 # ---------------------------------------------------------------------------
 
+
+NORMAL_RR_RATIO = 4.0  # ödül/risk = 4, etiket: RR 0.5/2
+
+
+def normal_entry_level(bias: str, price: float, sl: float, tp1: float) -> Optional[tuple[float, float, bool]]:
+    """Return (entry, reward/risk, used_current_price) for a 1:4 (0.5/2) setup, or None."""
+    if bias == "AL" and not (tp1 > sl):
+        return None
+    if bias == "SAT" and not (tp1 < sl):
+        return None
+
+    def rr_at(e: float) -> Optional[float]:
+        if bias == "AL" and not (sl < e < tp1):
+            return None
+        if bias == "SAT" and not (tp1 < e < sl):
+            return None
+        risk = abs(e - sl)
+        if risk <= 0:
+            return None
+        return abs(tp1 - e) / risk
+
+    rr_px = rr_at(price)
+    if rr_px is not None and rr_px + 1e-12 >= NORMAL_RR_RATIO:
+        return price, rr_px, True
+    e = (tp1 + NORMAL_RR_RATIO * sl) / (NORMAL_RR_RATIO + 1.0)
+    rr_e = rr_at(e)
+    if rr_e is None:
+        return None
+    return e, rr_e, False
+
+
 def fmt_pool(pool: Pool, kind: str) -> str:
     if near(pool.lo, pool.hi, abs_tol(kind, pool.mid) * 0.25):
         level = fmt_price((pool.lo + pool.hi) / 2.0, kind)
@@ -687,12 +718,17 @@ def format_instrument(res: InstrumentResult) -> str:
         f"Yön: <b>{res.bias}</b>",
     ]
     if res.bias in ("AL", "SAT") and res.entry is not None and res.sl is not None:
-        bits = [f"Giriş {fmt_price(res.entry, k)}", f"SL {fmt_price(res.sl, k)}"]
+        bits = [f"Giriş (SL yakın) {fmt_price(res.entry, k)}", f"SL {fmt_price(res.sl, k)}"]
         if res.tp1 is not None:
             bits.append(f"TP1 {fmt_price(res.tp1, k)}")
         if res.tp2 is not None:
             bits.append(f"TP2 {fmt_price(res.tp2, k)}")
         lines.append(" · ".join(bits))
+        if res.tp1 is not None:
+            normal = normal_entry_level(res.bias, res.price, res.sl, res.tp1)
+            if normal is not None:
+                e, _rr, _at_px = normal
+                lines.append(f"Normal giriş (RR 0.5/2): {fmt_price(e, k)}")
     else:
         lines.append("İşlem yok")
     return "\n".join(lines)
@@ -717,7 +753,7 @@ def build_message(
         parts.append("")
         parts.append(format_instrument(res))
     parts.append("")
-    parts.append("Kağıt işlem, kural bazlı, tahmini.")
+    parts.append("Kağıt işlem, kural bazlı, tahmini. Normal giriş düşük lotla.")
     return "\n".join(parts)
 
 
