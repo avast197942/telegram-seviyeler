@@ -1,109 +1,68 @@
-# Kural bazlı günlük işlem seviyeleri (Telegram)
+# Kural bazlı işlem seviyeleri (Telegram)
 
-Yapay zekâ kullanmadan, sabit kurallarla günlük (1D) pivot, likidite / iğne bölgeleri ve AL / SAT / BEKLE yönü üreten bir Python scripti. Sonuç Mehmet'in Telegram botuna (`@avast1979bot`) gider.
+Yapay zekâ kullanmadan, sabit kurallarla seviye ve AL / SAT / BEKLE yönü üreten bir Python scripti. Sonuç `@avast1979bot` ile Telegram'a gider.
 
-Kağıt işlem / araştırma amaçlıdır, yatırım tavsiyesi değildir. Tüm giriş, SL, TP ve iğne seviyeleri **kural bazlı ve tahmini** olarak etiketlenir.
+Kağıt işlem / araştırma amaçlıdır, yatırım tavsiyesi değildir. Giriş, SL, TP ve iğne seviyeleri **kural bazlı ve tahmini**dir. Mesajda ortalama, bant veya pivot adı yazılmaz.
 
-## Ne üretir?
+## Enstrümanlar
 
-Her çalıştırmada dört enstrüman:
+| Enstrüman | Veri kaynağı | Not |
+|-----------|----------------|-----|
+| XAUUSD | Yahoo `GC=F` | COMEX altın vadelisi (spot Yahoo'da yok) |
+| US100 | Yahoo `NQ=F` (yedek `^NDX`) | Nasdaq-100 vadelisi |
+| EURUSD | Yahoo `EURUSD=X` | |
+| DXY | Yahoo `DX-Y.NYB` | Endeks, bilgi amaçlı; işlem önerilmez |
+| BTC, ETH, XRP, DOGE | Hyperliquid `/info` `candleSnapshot` 1d | UTC günü |
 
-| Enstrüman | Veri kaynağı |
-|-----------|----------------|
-| XAUUSD | Yahoo Finance `GC=F` (COMEX altın vadelisi; spot `XAUUSD=X` Yahoo'da yok) |
-| US100 | Yahoo Finance `NQ=F` (Nasdaq-100 vadelisi; alınamazsa `^NDX`) |
-| EURUSD | Yahoo Finance `EURUSD=X` |
-| BTC | Hyperliquid public `/info` `candleSnapshot`, `coin=BTC`, `interval=1d` (UTC günü) |
+Günlük hareket uyarısı (🚩): kripto `%4`, diğerleri `%2`.
 
-DXY (`DX-Y.NYB`) yalnızca XAUUSD, EURUSD ve BTC altında tek satırlık bağlamdır.
+Her enstrüman için kısa satırlar: fiyat ve günlük değişim; aylık / haftalık / günlük en üst ve en alt; muhtemel iğne üst ve alt; yön; AL / SAT ise giriş, SL, TP1, TP2. BEKLE ise "İşlem yok". 3 yıldızlı ABD / Avro verisi varsa üstte `⚠️ 3★ veri: saat TSİ ad` satırı (Forex Factory, `USD`/`EUR` + `High`; kaynak düşerse atlanır).
 
-Hesaplananlar (günlük mumlar, yapay zekâ yok):
+Giriş, iğne bölgesinin hemen yanında, SL de o bölgenin hemen ötesinde (sıkı risk). TP1 / TP2 karşı taraftaki günlük, sonra haftalık (gerekirse aylık) uçlardır.
 
-- Son kapanış ve günlük yüzde değişim
-- Klasik pivot: önceki tamamlanmış günden P, R1, R2, S1, S2 (R3/S3 TP için yedek)
-- Önceki gün yüksek / düşük
-- Önceki tamamlanmış işlem haftası (Pzt–Cuma) yüksek / düşük
-- 20 günlük salınım yüksek / düşük
-- Muhtemel iğne bölgeleri: önceki gün / hafta H-L, eşit tepeler-dipler, salınım noktaları (havuz adı ile)
-- Yön kuralı: kapanış 20 ve 50 günlük ortalamanın **ve** pivotun üstündeyse AL, hepsinin altındaysa SAT, karışıksa **BEKLE** (kayıp toleransı yok)
-- AL / SAT ise tahmini giriş bölgesi, en yakın likidite havuzunun ötesinde SL, sonraki pivotlarda TP1 / TP2
-- Günlük hareket uyarısı: `|değişim| ≥ %2` (BTC için %4)
-- Bugün yüksek etkili ABD / Avro bölgesi verisi varsa `Dikkat` satırı (Forex Factory haftalık JSON, `USD`/`EUR` + `High`; kaynak başarısızsa sessizce atlanır)
-
-Saatler Türkiye saati (TSİ, Europe/Istanbul) ile yazılır.
+Saatler Türkiye saati (TSİ, Europe/Istanbul) iledir. Zamanlama: her 2 saatte bir (TSİ tek saatler: 01, 03, … 23).
 
 ## Yerel kurulum
 
 ```bash
 cd telegram-levels
 python3 -m pip install -r requirements.txt
-python3 levels_bot.py --dry-run    # mesajı basar, Telegram'a göndermez, token gerekmez
+python3 levels_bot.py --dry-run    # mesajı basar, Telegram'a göndermez
 ```
 
-### Telegram anahtarı ve sohbet
-
-1. Telegram'da [@BotFather](https://t.me/BotFather) ile bot oluşturun (`/newbot`) ve bot anahtarını alın.
-2. Anahtarı **asla dosyaya düz metin olarak repoya koymayın.** Bu kutuda 600 izinli bir env dosyası kullanılır:
+Bot anahtarı repoya konmaz. Ortam değişkeni veya 600 izinli dosya:
 
 ```bash
 mkdir -p ~/.config/telegram-levels
-# Anahtarı yazın; değeri ekrana basmayın, dosya iznini 600 yapın
 umask 077
-# TELEGRAM_BOT_TOKEN=... ve TELEGRAM_CHAT_ID=... satırlarını dosyaya ekleyin
+# TELEGRAM_BOT_TOKEN ve TELEGRAM_CHAT_ID satırlarını dosyaya yazın
 chmod 600 ~/.config/telegram-levels/env
 ```
 
-`levels_bot.py` önce ortam değişkenlerine, yoksa sırayla `~/.config/telegram-levels/env` ve proje içi `.env` dosyasına bakar.
-
-3. Chat id:
-   - Ortamda `TELEGRAM_CHAT_ID` varsa o kullanılır ve `data/chat_id` dosyasına kaydedilir.
-   - Yoksa kayıtlı `data/chat_id` okunur.
-   - O da yoksa `getUpdates` ile bulunur: önce grup / kanal, yoksa özel sohbet.
-   - Hiçbiri yoksa script **mesaj göndermeden** çıkar ve net bir günlük satırı yazar.
-
-İlk kurulumda bota Telegram'dan `/start` veya merhaba yazın, ya da botu hedef gruba / kanala **yönetici** olarak ekleyin. Grup id'sini biliyorsanız `TELEGRAM_CHAT_ID` yeterli.
-
-`--dry-run` olmadan çalıştırma (token + chat id gerekir):
+Chat id sırası: `TELEGRAM_CHAT_ID`, kayıtlı `data/chat_id`, sonra `getUpdates` (önce grup / kanal).
 
 ```bash
 set -a; source ~/.config/telegram-levels/env; set +a
 python3 levels_bot.py
 ```
 
-## Bu kutuda zamanlama (cron)
+## GitHub Actions
 
-Hafta içi 09:00 ve 16:00 TSİ:
-
-```
-CRON_TZ=Europe/Istanbul
-0 9,16 * * 1-5 /bin/bash -lc 'set -a; source /home/box/.config/telegram-levels/env; set +a; /usr/bin/python3 /workspace/telegram-levels/levels_bot.py >> /workspace/telegram-levels/logs/cron.log 2>&1'
-```
-
-Cron, bot anahtarını 600 izinli env dosyasından okur; yapay zekâ devreye girmez.
-
-> Bu makinede `cron` paketi kurulu değilse crontab yazılsa bile çalışmaz. Aşağıdaki GitHub Actions yolu kutuya bağlı kalmadan ücretsiz çalışır.
-
-## GitHub Actions (kutuya bağlı kalmadan, ücretsiz)
-
-Bu klasörü bir GitHub deposuna koyun. İş akışı: `.github/workflows/levels.yml`
-
-- Zamanlama: `0 6,13 * * 1-5` (UTC) = hafta içi 09:00 ve 16:00 TSİ (Türkiye UTC+3).
-- Elle çalıştırma: Actions sekmesinde **Run workflow**.
+`.github/workflows/levels.yml` — `0 */2 * * *` (UTC çift saat = TSİ 01, 03, … 23) ve elle **Run workflow**.
 
 Gizli bilgiler (Settings → Secrets and variables → Actions):
 
 | Secret | Değer |
 |--------|--------|
 | `TELEGRAM_BOT_TOKEN` | BotFather anahtarı |
-| `TELEGRAM_CHAT_ID` | Hedef sohbet / grup / kanal id (ör. `-100…`) |
+| `TELEGRAM_CHAT_ID` | Hedef sohbet / grup id |
 
-İş akışı `levels_bot.py` dosyasını çalıştırır; yorum üreten bir model çağırmaz.
+İş akışı model çağırmaz.
 
 ## Sınırlar
 
-- Altın fiyatı **vadeli** (`GC=F`), spot XAUUSD değil; vadeli-spot farkı olabilir.
-- US100 varsayılanı Nasdaq-100 **vadelisi** (`NQ=F`).
-- BTC günlük mumu UTC gece yarısına göre açılır.
-- Yahoo veya Hyperliquid kesilirse ilgili enstrüman "veri alınamadı" olur; hepsi düşerse mesaj gönderilmez.
-- Yön kuralı yalnızca kapanış / ortalama / pivot karşılaştırmasıdır; haber veya duygu okumaz. Veri gününde yalnızca `Dikkat` satırı eklenir.
-- BEKLE varsayılandır. Giriş / SL / TP yalnızca AL veya SAT iken ve tahmini etiketle yazılır.
+- Altın ve US100 vadeli fiyattır, spot / nakit endeksten farklı olabilir.
+- Kripto günlük mumu UTC gece yarısına göredir.
+- Yön kuralı fiyatın kısa ve orta dönem ortalaması ile gün ortasına göre konumudur; mesajda bu adlar yazılmaz. Haber okunmaz.
+- BEKLE varsayılandır. DXY işlem değildir.
+- Yahoo veya Hyperliquid kesilirse o satır "Veri yok" olur.

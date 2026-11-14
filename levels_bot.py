@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Kural bazlı günlük (1D) işlem seviyeleri — Telegram.
+"""Kural bazlı işlem seviyeleri — Telegram.
 
 Yapay zekâ yok. Kağıt işlem / araştırma amaçlıdır, yatırım tavsiyesi değildir.
 Tüm giriş, SL, TP ve iğne seviyeleri kural bazlı ve tahmini.
+Mesajda gösterge adı (ortalama, bant, pivot) yazılmaz.
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ ENV_CANDIDATES = [
 
 TOKEN_RE = re.compile(r"\d{6,12}:[A-Za-z0-9_-]{30,}")
 FALLBACK_PRIVATE_CHAT_ID = "680205596"
+CRYPTO = {"BTC", "ETH", "XRP", "DOGE"}
 
 log = logging.getLogger("levels_bot")
 
@@ -48,7 +50,7 @@ log = logging.getLogger("levels_bot")
 # ---------------------------------------------------------------------------
 
 def load_env_files() -> None:
-    """Load KEY=VALUE from  env files without overriding already-set vars."""
+    """Load KEY=VALUE from env files without overriding already-set vars."""
     for path in ENV_CANDIDATES:
         if not path.is_file():
             continue
@@ -88,7 +90,7 @@ def setup_logging() -> None:
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
     root = logging.getLogger()
     root.setLevel(logging.INFO)
-    sh = logging.StreamHandler(sys.stdout)
+    sh = logging.StreamHandler(sys.stderr)
     sh.setFormatter(fmt)
     root.handlers.clear()
     root.addHandler(sh)
@@ -125,12 +127,8 @@ def fmt_when(dt: datetime) -> str:
     return f"{local.day} {MONTHS_TR[local.month]} {local.year} {local:%H:%M} TSİ"
 
 
-def fmt_day(d: date) -> str:
-    return f"{d.day} {MONTHS_TR[d.month]} {d.year}"
-
-
 def fmt_price(value: float, kind: str) -> str:
-    if value is None or (isinstance(value, float) and (value != value)):  # NaN
+    if value is None or (isinstance(value, float) and (value != value)):
         return "—"
     if kind == "EURUSD":
         return f"{value:.5f}"
@@ -142,6 +140,12 @@ def fmt_price(value: float, kind: str) -> str:
         return f"{value:,.2f}"
     if kind == "BTC":
         return f"{value:,.0f}"
+    if kind == "ETH":
+        return f"{value:,.2f}"
+    if kind == "XRP":
+        return f"{value:.5f}"
+    if kind == "DOGE":
+        return f"{value:.6f}"
     return f"{value:,.2f}"
 
 
@@ -165,6 +169,12 @@ def last_completed_trading_week(asof: date) -> tuple[date, date]:
     return monday, friday
 
 
+def prev_month_start(d: date) -> date:
+    if d.month == 1:
+        return date(d.year - 1, 12, 1)
+    return date(d.year, d.month - 1, 1)
+
+
 # ---------------------------------------------------------------------------
 # Data models
 # ---------------------------------------------------------------------------
@@ -176,17 +186,6 @@ class Bar:
     h: float
     l: float
     c: float
-
-
-@dataclass
-class Pivots:
-    p: float
-    r1: float
-    r2: float
-    r3: float
-    s1: float
-    s2: float
-    s3: float
 
 
 @dataclass
@@ -205,26 +204,23 @@ class InstrumentResult:
     key: str
     title: str
     source_note: str
-    show_dxy: bool
+    informational: bool
     price: float
     change_pct: float
     move_threshold: float
-    pivots: Pivots
-    prev_high: float
-    prev_low: float
+    month_high: Optional[float]
+    month_low: Optional[float]
+    prev_month_high: Optional[float]
+    prev_month_low: Optional[float]
+    show_prev_month: bool
     week_high: float
     week_low: float
-    week_range: str
-    swing20_high: float
-    swing20_low: float
-    sma20: Optional[float]
-    sma50: Optional[float]
+    prev_high: float
+    prev_low: float
     bias: str
-    bias_reason: str
     igne_up: list[Pool] = field(default_factory=list)
     igne_down: list[Pool] = field(default_factory=list)
-    entry_lo: Optional[float] = None
-    entry_hi: Optional[float] = None
+    entry: Optional[float] = None
     sl: Optional[float] = None
     tp1: Optional[float] = None
     tp2: Optional[float] = None
@@ -274,10 +270,7 @@ def fetch_yahoo_daily(ticker: str, period: str = "6mo") -> list[Bar]:
     bars: list[Bar] = []
     for idx, row in df.iterrows():
         ts = idx.to_pydatetime() if hasattr(idx, "to_pydatetime") else idx
-        if getattr(ts, "tzinfo", None) is not None:
-            d = ts.date()
-        else:
-            d = ts.date() if hasattr(ts, "date") else date.fromisoformat(str(idx)[:10])
+        d = ts.date() if hasattr(ts, "date") else date.fromisoformat(str(idx)[:10])
         bars.append(
             Bar(
                 d=d,
@@ -292,13 +285,13 @@ def fetch_yahoo_daily(ticker: str, period: str = "6mo") -> list[Bar]:
     return bars
 
 
-def fetch_hl_btc_daily(lookback_days: int = 120) -> list[Bar]:
+def fetch_hl_daily(coin: str, lookback_days: int = 150) -> list[Bar]:
     end_ms = int(time.time() * 1000)
     start_ms = end_ms - lookback_days * 86400 * 1000
     payload = {
         "type": "candleSnapshot",
         "req": {
-            "coin": "BTC",
+            "coin": coin,
             "interval": "1d",
             "startTime": start_ms,
             "endTime": end_ms,
@@ -306,7 +299,7 @@ def fetch_hl_btc_daily(lookback_days: int = 120) -> list[Bar]:
     }
     data = http_json(HL_INFO_URL, payload=payload, timeout=25)
     if not isinstance(data, list) or not data:
-        raise RuntimeError("Hyperliquid BTC: boş mum verisi")
+        raise RuntimeError(f"Hyperliquid {coin}: boş mum verisi")
     bars: list[Bar] = []
     for row in data:
         t_ms = int(row["t"])
@@ -322,12 +315,12 @@ def fetch_hl_btc_daily(lookback_days: int = 120) -> list[Bar]:
         )
     bars.sort(key=lambda b: b.d)
     if len(bars) < 25:
-        raise RuntimeError(f"Hyperliquid BTC: yetersiz bar ({len(bars)})")
+        raise RuntimeError(f"Hyperliquid {coin}: yetersiz bar ({len(bars)})")
     return bars
 
 
 def fetch_calendar_high_usd_eur(today: date) -> list[dict]:
-    """Forex Factory haftalık JSON; yalnızca bugünkü USD/EUR High. Hata olursa boş liste."""
+    """Forex Factory haftalık JSON; yalnızca bugünkü USD/EUR High (3 yıldız). Hata olursa boş liste."""
     try:
         data = http_json(
             FF_CALENDAR_URL,
@@ -335,7 +328,7 @@ def fetch_calendar_high_usd_eur(today: date) -> list[dict]:
             headers={"User-Agent": "Mozilla/5.0 levels-bot/1.0"},
         )
     except Exception as exc:
-        log.warning("Ekonomik takvim alınamadı, 'Dikkat' satırı atlanacak: %s", exc)
+        log.warning("Ekonomik takvim alınamadı, 3★ satırı atlanacak: %s", exc)
         return []
     if not isinstance(data, list):
         log.warning("Ekonomik takvim beklenmeyen biçimde, atlanıyor")
@@ -361,7 +354,6 @@ def fetch_calendar_high_usd_eur(today: date) -> list[dict]:
                 "title": ev.get("title") or "Veri",
                 "country": ev.get("country"),
                 "when": local,
-                "forecast": (ev.get("forecast") or "").strip(),
             }
         )
     events.sort(key=lambda e: e["when"])
@@ -369,18 +361,11 @@ def fetch_calendar_high_usd_eur(today: date) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Calculations
+# Calculations (internal rules; names are not printed)
 # ---------------------------------------------------------------------------
 
-def classic_pivots(h: float, l: float, c: float) -> Pivots:
-    p = (h + l + c) / 3.0
-    r1 = 2 * p - l
-    s1 = 2 * p - h
-    r2 = p + (h - l)
-    s2 = p - (h - l)
-    r3 = h + 2 * (p - l)
-    s3 = l - 2 * (h - p)
-    return Pivots(p=p, r1=r1, r2=r2, r3=r3, s1=s1, s2=s2, s3=s3)
+def classic_pivot(h: float, l: float, c: float) -> float:
+    return (h + l + c) / 3.0
 
 
 def sma(values: list[float], n: int) -> Optional[float]:
@@ -391,15 +376,19 @@ def sma(values: list[float], n: int) -> Optional[float]:
 
 def rel_tol(kind: str) -> float:
     if kind == "EURUSD":
-        return 0.0008  # ~8 pip / fiyat
-    if kind == "BTC":
-        return 0.0020
-    return 0.0015  # XAU, US100
+        return 0.0008
+    if kind == "DXY":
+        return 0.0012
+    if kind in CRYPTO:
+        return 0.0025 if kind in ("XRP", "DOGE") else 0.0020
+    return 0.0015
 
 
 def abs_tol(kind: str, price: float) -> float:
     if kind == "EURUSD":
         return 0.00080
+    if kind == "DXY":
+        return 0.12
     return price * rel_tol(kind)
 
 
@@ -450,25 +439,46 @@ def merge_pool(existing: list[Pool], lo: float, hi: float, name: str, tol: float
 
 
 def sl_buffer(kind: str, prev_range: float, price: float) -> float:
+    """Tight buffer just beyond the iğne zone."""
     if kind == "EURUSD":
-        return max(0.00040, 0.10 * prev_range)
-    frac = 0.10 * prev_range
-    pct = 0.0015 * price if kind != "BTC" else 0.0025 * price
-    return max(frac, pct)
+        return max(0.00025, min(0.00060, 0.06 * prev_range))
+    if kind == "DXY":
+        return max(0.04, min(0.12, 0.06 * prev_range))
+    if kind in ("XRP", "DOGE"):
+        return max(price * 0.0020, min(price * 0.0040, 0.06 * prev_range))
+    if kind in ("BTC", "ETH"):
+        return max(price * 0.0012, min(price * 0.0030, 0.06 * prev_range))
+    return max(price * 0.0007, min(price * 0.0020, 0.06 * prev_range))
 
 
 def select_ref_bars(bars: list[Bar], asof: date, utc_session: bool) -> tuple[Bar, Bar, bool]:
-    """Return (last_bar, pivot_source_bar, last_is_in_progress)."""
+    """Return (last_bar, completed_day_bar, last_is_in_progress)."""
     last = bars[-1]
     prev = bars[-2]
-    if utc_session:
-        today = datetime.now(timezone.utc).date()
-    else:
-        today = asof
+    today = datetime.now(timezone.utc).date() if utc_session else asof
     in_progress = last.d >= today
-    pivot_bar = prev if in_progress else last
-    # önceki gün for display: the completed day used for pivots
-    return last, pivot_bar, in_progress
+    completed = prev if in_progress else last
+    return last, completed, in_progress
+
+
+def month_hl(bars: list[Bar], year: int, month: int) -> tuple[Optional[float], Optional[float]]:
+    mb = [b for b in bars if b.d.year == year and b.d.month == month]
+    if not mb:
+        return None, None
+    return max(b.h for b in mb), min(b.l for b in mb)
+
+
+def unique_targets(levels: list[float], entry: float, direction: str, tol: float, buf: float) -> list[float]:
+    out: list[float] = []
+    for lv in levels:
+        if direction == "AL" and lv <= entry + buf:
+            continue
+        if direction == "SAT" and lv >= entry - buf:
+            continue
+        if any(near(lv, x, tol) for x in out):
+            continue
+        out.append(lv)
+    return out
 
 
 def compute_instrument(
@@ -477,42 +487,49 @@ def compute_instrument(
     source_note: str,
     bars: list[Bar],
     asof: date,
-    show_dxy: bool,
     move_threshold: float,
+    informational: bool = False,
     utc_session: bool = False,
 ) -> InstrumentResult:
-    last, pivot_bar, in_progress = select_ref_bars(bars, asof, utc_session)
-    # For "önceki gün" H/L: the completed day that produced today's (or next session's) pivots
-    # is pivot_bar when last is in progress (yesterday). When last is complete, pivot_bar
-    # is last itself (next-session pivots), and önceki gün is that completed day.
+    last, completed, _in_progress = select_ref_bars(bars, asof, utc_session)
     prev_for_change = bars[-2]
     price = last.c
     change_pct = (last.c / prev_for_change.c - 1.0) * 100.0 if prev_for_change.c else 0.0
 
-    piv = classic_pivots(pivot_bar.h, pivot_bar.l, pivot_bar.c)
-    prev_high, prev_low = pivot_bar.h, pivot_bar.l
+    # Internal reference only (not printed): classic central level of the completed day
+    mid = classic_pivot(completed.h, completed.l, completed.c)
+    prev_high, prev_low = completed.h, completed.l
 
-    week_start, week_end = last_completed_trading_week(asof if not utc_session else last.d)
+    ref_date = last.d if utc_session else asof
+    week_start, week_end = last_completed_trading_week(ref_date)
     week_bars = [b for b in bars if week_start <= b.d <= week_end]
     if not week_bars:
-        # fallback: last 5 completed bars before last (or before pivot)
         week_bars = bars[-6:-1] if len(bars) > 6 else bars[:-1]
-        week_start, week_end = week_bars[0].d, week_bars[-1].d
     week_high = max(b.h for b in week_bars)
     week_low = min(b.l for b in week_bars)
-    week_range = f"{fmt_day(week_start)}–{fmt_day(week_end)}"
 
-    window20 = bars[-20:]
-    swing20_high = max(b.h for b in window20)
-    swing20_low = min(b.l for b in window20)
+    month_high, month_low = month_hl(bars, ref_date.year, ref_date.month)
+    pm = prev_month_start(ref_date)
+    prev_month_high, prev_month_low = month_hl(bars, pm.year, pm.month)
+    show_prev_month = False
+    if month_high is not None and prev_month_high is not None:
+        # Previous month is useful if it extends the range, or current month is still thin
+        current_bars = [b for b in bars if b.d.year == ref_date.year and b.d.month == ref_date.month]
+        extends = prev_month_high > month_high + abs_tol(key, price) or (
+            prev_month_low is not None and month_low is not None and prev_month_low < month_low - abs_tol(key, price)
+        )
+        show_prev_month = extends or len(current_bars) < 6
+    elif prev_month_high is not None:
+        show_prev_month = True
 
     closes = [b.c for b in bars]
     s20 = sma(closes, 20)
     s50 = sma(closes, 50)
 
-    # Bias: AL only if close > SMA20 and SMA50 (if present) and pivot; SAT only if all below; else BEKLE
-    above_p = price > piv.p
-    below_p = price < piv.p
+    # Internal bias: AL only if close is above the 20- and 50-period averages and the
+    # completed-day midpoint; SAT only if below all three; otherwise BEKLE.
+    above_mid = price > mid
+    below_mid = price < mid
     above_s20 = s20 is not None and price > s20
     below_s20 = s20 is not None and price < s20
     if s50 is not None:
@@ -522,29 +539,12 @@ def compute_instrument(
         above_s50 = above_s20
         below_s50 = below_s20
 
-    if above_p and above_s20 and above_s50:
+    if above_mid and above_s20 and above_s50:
         bias = "AL"
-        parts = ["kapanış pivotun üstünde"]
-        parts.append("20 günlük ortalamanın üstünde")
-        if s50 is not None:
-            parts.append("50 günlük ortalamanın üstünde")
-        bias_reason = " ve ".join(parts)
-    elif below_p and below_s20 and below_s50:
+    elif below_mid and below_s20 and below_s50:
         bias = "SAT"
-        parts = ["kapanış pivotun altında"]
-        parts.append("20 günlük ortalamanın altında")
-        if s50 is not None:
-            parts.append("50 günlük ortalamanın altında")
-        bias_reason = " ve ".join(parts)
     else:
         bias = "BEKLE"
-        bits = []
-        if s20 is not None:
-            bits.append("SMA20 " + ("üstünde" if above_s20 else "altında"))
-        if s50 is not None:
-            bits.append("SMA50 " + ("üstünde" if above_s50 else "altında"))
-        bits.append("pivotun " + ("üstünde" if above_p else "altında" if below_p else "üzerinde"))
-        bias_reason = "sinyaller karışık (" + ", ".join(bits) + "); kayıp riski için BEKLE"
 
     tol = abs_tol(key, price)
     pools: list[Pool] = []
@@ -552,16 +552,17 @@ def compute_instrument(
     merge_pool(pools, prev_low, prev_low, "önceki gün dip", tol)
     merge_pool(pools, week_high, week_high, "önceki hafta tepe", tol)
     merge_pool(pools, week_low, week_low, "önceki hafta dip", tol)
-    merge_pool(pools, swing20_high, swing20_high, "20g salınım tepe", tol)
-    merge_pool(pools, swing20_low, swing20_low, "20g salınım dip", tol)
+    if month_high is not None and month_low is not None:
+        merge_pool(pools, month_high, month_high, "aylık tepe", tol)
+        merge_pool(pools, month_low, month_low, "aylık dip", tol)
 
     lookback = bars[-40:] if len(bars) >= 40 else bars
     eq_h = cluster_prices([b.h for b in lookback], tol)
     eq_l = cluster_prices([b.l for b in lookback], tol)
-    for lo, hi, n in eq_h:
-        merge_pool(pools, lo, hi, f"eşit tepeler ({n} dokunuş)", tol)
-    for lo, hi, n in eq_l:
-        merge_pool(pools, lo, hi, f"eşit dipler ({n} dokunuş)", tol)
+    for lo, hi, _n in eq_h:
+        merge_pool(pools, lo, hi, "eşit tepeler", tol)
+    for lo, hi, _n in eq_l:
+        merge_pool(pools, lo, hi, "eşit dipler", tol)
 
     sw_h, sw_l = fractal_swings(lookback, left=2, right=2)
     for h in sw_h[-6:]:
@@ -569,61 +570,64 @@ def compute_instrument(
     for l_ in sw_l[-6:]:
         merge_pool(pools, l_, l_, "salınım dip", tol)
 
-    igne_up = sorted([p for p in pools if p.mid > price + tol], key=lambda p: p.lo)
-    igne_down = sorted([p for p in pools if p.mid < price - tol], key=lambda p: p.hi, reverse=True)
-    igne_up = igne_up[:2]
-    igne_down = igne_down[:2]
+    igne_up = sorted([p for p in pools if p.mid > price + tol], key=lambda p: p.lo)[:2]
+    igne_down = sorted([p for p in pools if p.mid < price - tol], key=lambda p: p.hi, reverse=True)[:2]
 
-    entry_lo = entry_hi = sl = tp1 = tp2 = None
-    prev_range = max(pivot_bar.h - pivot_bar.l, abs_tol(key, price))
+    entry = sl = tp1 = tp2 = None
+    prev_range = max(completed.h - completed.l, abs_tol(key, price))
     buf = sl_buffer(key, prev_range, price)
-    entry_pad = max(buf, abs_tol(key, price))
+    tick = max(buf * 0.25, abs_tol(key, price) * 0.15)
 
     if bias == "AL":
-        nearest_below = igne_down[0].hi if igne_down else (piv.s1 if piv.s1 < price else piv.s2)
-        entry_hi = price
-        entry_lo = max(nearest_below + buf, price - 2 * entry_pad)
-        if entry_lo >= entry_hi:
-            entry_lo = price - entry_pad
-        sl = nearest_below - buf
-        ups = [x for x in (piv.r1, piv.r2, piv.r3) if x > price + buf]
-        tp1 = ups[0] if ups else None
-        tp2 = ups[1] if len(ups) > 1 else None
+        zone = igne_down[0] if igne_down else Pool(prev_low, prev_low, "önceki gün dip")
+        entry = zone.hi + tick
+        sl = zone.lo - buf
+        if sl >= entry:
+            sl = entry - buf
+        highs = [prev_high, week_high]
+        if month_high is not None:
+            highs.append(month_high)
+        if show_prev_month and prev_month_high is not None:
+            highs.append(prev_month_high)
+        tps = unique_targets(highs, entry, "AL", tol, buf)
+        tp1 = tps[0] if tps else None
+        tp2 = tps[1] if len(tps) > 1 else None
     elif bias == "SAT":
-        nearest_above = igne_up[0].lo if igne_up else (piv.r1 if piv.r1 > price else piv.r2)
-        entry_lo = price
-        entry_hi = min(nearest_above - buf, price + 2 * entry_pad)
-        if entry_hi <= entry_lo:
-            entry_hi = price + entry_pad
-        sl = nearest_above + buf
-        downs = [x for x in (piv.s1, piv.s2, piv.s3) if x < price - buf]
-        tp1 = downs[0] if downs else None
-        tp2 = downs[1] if len(downs) > 1 else None
+        zone = igne_up[0] if igne_up else Pool(prev_high, prev_high, "önceki gün tepe")
+        entry = zone.lo - tick
+        sl = zone.hi + buf
+        if sl <= entry:
+            sl = entry + buf
+        lows = [prev_low, week_low]
+        if month_low is not None:
+            lows.append(month_low)
+        if show_prev_month and prev_month_low is not None:
+            lows.append(prev_month_low)
+        tps = unique_targets(lows, entry, "SAT", tol, buf)
+        tp1 = tps[0] if tps else None
+        tp2 = tps[1] if len(tps) > 1 else None
 
     return InstrumentResult(
         key=key,
         title=title,
         source_note=source_note,
-        show_dxy=show_dxy,
+        informational=informational,
         price=price,
         change_pct=change_pct,
         move_threshold=move_threshold,
-        pivots=piv,
-        prev_high=prev_high,
-        prev_low=prev_low,
+        month_high=month_high,
+        month_low=month_low,
+        prev_month_high=prev_month_high,
+        prev_month_low=prev_month_low,
+        show_prev_month=show_prev_month,
         week_high=week_high,
         week_low=week_low,
-        week_range=week_range,
-        swing20_high=swing20_high,
-        swing20_low=swing20_low,
-        sma20=s20,
-        sma50=s50,
+        prev_high=prev_high,
+        prev_low=prev_low,
         bias=bias,
-        bias_reason=bias_reason,
         igne_up=igne_up,
         igne_down=igne_down,
-        entry_lo=entry_lo,
-        entry_hi=entry_hi,
+        entry=entry,
         sl=sl,
         tp1=tp1,
         tp2=tp2,
@@ -643,109 +647,77 @@ def fmt_pool(pool: Pool, kind: str) -> str:
     return f"{level} ({pool.name})"
 
 
-def format_instrument(res: InstrumentResult, dxy_line: Optional[str]) -> str:
+def format_month_line(res: InstrumentResult) -> str:
+    k = res.key
+    if res.month_high is None or res.month_low is None:
+        if res.prev_month_high is not None and res.prev_month_low is not None:
+            return (
+                f"Aylık: üst {fmt_price(res.prev_month_high, k)} / "
+                f"alt {fmt_price(res.prev_month_low, k)} (önceki ay)"
+            )
+        return "Aylık: veri yok"
+    line = f"Aylık: üst {fmt_price(res.month_high, k)} / alt {fmt_price(res.month_low, k)}"
+    if res.show_prev_month and res.prev_month_high is not None and res.prev_month_low is not None:
+        line += (
+            f" (önceki {fmt_price(res.prev_month_high, k)} / "
+            f"{fmt_price(res.prev_month_low, k)})"
+        )
+    return line
+
+
+def format_instrument(res: InstrumentResult) -> str:
     k = res.key
     if res.error:
-        return f"<b>{html_escape(res.title)}</b>\nVeri alınamadı: {html_escape(res.error)}"
+        return f"<b>{html_escape(res.title)}</b>\nVeri yok"
 
-    lines: list[str] = []
-    alert = ""
+    flags = []
     if res.move_alert:
-        alert = f"  🚩 günlük hareket {fmt_pct(res.change_pct)} (eşik {res.move_threshold:.0f}%)"
-    lines.append(
-        f"<b>{html_escape(res.title)}</b>  {fmt_price(res.price, k)}  ({fmt_pct(res.change_pct)}){alert}"
-    )
-    lines.append(f"Kaynak: {html_escape(res.source_note)}")
-    if res.show_dxy and dxy_line:
-        lines.append(dxy_line)
-    p = res.pivots
-    lines.append(
-        "Pivot: P {p} | R1 {r1} | R2 {r2} | S1 {s1} | S2 {s2}".format(
-            p=fmt_price(p.p, k),
-            r1=fmt_price(p.r1, k),
-            r2=fmt_price(p.r2, k),
-            s1=fmt_price(p.s1, k),
-            s2=fmt_price(p.s2, k),
-        )
-    )
-    lines.append(
-        f"Önceki gün: H {fmt_price(res.prev_high, k)} / L {fmt_price(res.prev_low, k)}"
-    )
-    lines.append(
-        f"Önceki hafta ({res.week_range}): H {fmt_price(res.week_high, k)} / L {fmt_price(res.week_low, k)}"
-    )
-    lines.append(
-        f"20g salınım: H {fmt_price(res.swing20_high, k)} / L {fmt_price(res.swing20_low, k)}"
-    )
-    if res.igne_up:
-        lines.append("Muhtemel iğne üst: " + "; ".join(fmt_pool(x, k) for x in res.igne_up))
-    else:
-        lines.append("Muhtemel iğne üst: belirgin havuz yok")
-    if res.igne_down:
-        lines.append("Muhtemel iğne alt: " + "; ".join(fmt_pool(x, k) for x in res.igne_down))
-    else:
-        lines.append("Muhtemel iğne alt: belirgin havuz yok")
+        flags.append("🚩")
+    if res.informational:
+        flags.append("endeks, bilgi amaçlı")
+    suffix = ("  " + " ".join(flags)) if flags else ""
 
-    lines.append(f"Yön (kural): <b>{res.bias}</b> — {html_escape(res.bias_reason)}.")
-    if res.bias in ("AL", "SAT") and res.entry_lo is not None and res.sl is not None:
-        ent = f"{fmt_price(res.entry_lo, k)}–{fmt_price(res.entry_hi, k)}"
-        tps = []
+    lines = [
+        f"<b>{html_escape(res.title)}</b>  {fmt_price(res.price, k)}  ({fmt_pct(res.change_pct)}){suffix}",
+        format_month_line(res),
+        f"Haftalık: üst {fmt_price(res.week_high, k)} / alt {fmt_price(res.week_low, k)}",
+        f"Günlük: üst {fmt_price(res.prev_high, k)} / alt {fmt_price(res.prev_low, k)}",
+        "İğne üst: " + ("; ".join(fmt_pool(x, k) for x in res.igne_up) if res.igne_up else "yok"),
+        "İğne alt: " + ("; ".join(fmt_pool(x, k) for x in res.igne_down) if res.igne_down else "yok"),
+        f"Yön: <b>{res.bias}</b>",
+    ]
+    if res.bias in ("AL", "SAT") and res.entry is not None and res.sl is not None:
+        bits = [f"Giriş {fmt_price(res.entry, k)}", f"SL {fmt_price(res.sl, k)}"]
         if res.tp1 is not None:
-            tps.append(f"TP1 {fmt_price(res.tp1, k)}")
+            bits.append(f"TP1 {fmt_price(res.tp1, k)}")
         if res.tp2 is not None:
-            tps.append(f"TP2 {fmt_price(res.tp2, k)}")
-        tp_txt = " | " + " | ".join(tps) if tps else ""
-        lines.append(
-            f"Giriş (tahmini): {ent} | SL {fmt_price(res.sl, k)}{tp_txt}"
-        )
-        lines.append("Bu seviyeler kural bazlı, tahmini, kağıt işlemdir.")
+            bits.append(f"TP2 {fmt_price(res.tp2, k)}")
+        lines.append(" · ".join(bits))
+    else:
+        lines.append("İşlem yok")
     return "\n".join(lines)
 
 
-def format_dxy_line(bars: Optional[list[Bar]], err: Optional[str]) -> str:
-    if err or not bars:
-        return "DXY durumu: veri yok"
-    last = bars[-1]
-    prev = bars[-2] if len(bars) > 1 else last
-    chg = (last.c / prev.c - 1.0) * 100.0 if prev.c else 0.0
-    return f"DXY durumu: {fmt_price(last.c, 'DXY')} ({fmt_pct(chg)}) — kaynak Yahoo DX-Y.NYB"
-
-
-def format_attention(events: list[dict]) -> str:
-    if not events:
-        return ""
-    bits = []
+def format_attention(events: list[dict]) -> list[str]:
+    lines = []
     for ev in events:
         t = ev["when"].strftime("%H:%M")
-        fc = f", beklenti {ev['forecast']}" if ev["forecast"] else ""
-        bits.append(f"{ev['country']} {ev['title']} {t} TSİ{fc}")
-    return "⚠️ <b>Dikkat:</b> Bugün yüksek etkili ABD/Avrupa verisi: " + "; ".join(bits) + "."
+        lines.append(f"⚠️ 3★ veri: {t} TSİ {ev['title']}")
+    return lines
 
 
 def build_message(
     results: list[InstrumentResult],
-    dxy_line: str,
     events: list[dict],
     generated_at: datetime,
 ) -> str:
-    parts: list[str] = []
-    parts.append(f"<b>Günlük seviyeler (1D)</b>")
-    parts.append(fmt_when(generated_at))
-    parts.append("Kağıt işlem / araştırma. Seviyeler kural bazlı, tahmini. Yatırım tavsiyesi değildir.")
-    att = format_attention(events)
-    if att:
-        parts.append("")
-        parts.append(att)
+    parts: list[str] = [f"<b>Seviyeler</b> · {fmt_when(generated_at)}"]
+    parts.extend(format_attention(events))
     for res in results:
         parts.append("")
-        parts.append(format_instrument(res, dxy_line if res.show_dxy else None))
+        parts.append(format_instrument(res))
     parts.append("")
-    parts.append(
-        "Kaynaklar: XAUUSD Yahoo GC=F (altın vadelisi, spot değil); "
-        "US100 Yahoo NQ=F (Nasdaq-100 vadelisi, yoksa ^NDX); "
-        "EURUSD Yahoo EURUSD=X; BTC Hyperliquid public /info candleSnapshot 1d (UTC); "
-        "DXY Yahoo DX-Y.NYB; takvim Forex Factory haftalık JSON (USD/EUR High)."
-    )
+    parts.append("Kağıt işlem, kural bazlı, tahmini.")
     return "\n".join(parts)
 
 
@@ -845,25 +817,37 @@ def resolve_chat_id() -> Optional[str]:
     return None
 
 
+def split_message(text: str, limit: int = 3900) -> list[str]:
+    if len(text) <= limit:
+        return [text]
+    blocks = text.split("\n\n")
+    chunks: list[str] = []
+    buf: list[str] = []
+    size = 0
+    for block in blocks:
+        add = (2 if buf else 0) + len(block)
+        if size + add > limit and buf:
+            chunks.append("\n\n".join(buf))
+            buf, size = [block], len(block)
+        else:
+            buf.append(block)
+            size += add
+    if buf:
+        chunks.append("\n\n".join(buf))
+    # If a single block is still too long, hard-split
+    out: list[str] = []
+    for ch in chunks:
+        if len(ch) <= limit:
+            out.append(ch)
+            continue
+        for i in range(0, len(ch), limit):
+            out.append(ch[i : i + limit])
+    return out
+
+
 def send_message(chat_id: str, text: str) -> list[int]:
     ids: list[int] = []
-    # Telegram limit 4096; split on double newlines if needed
-    chunks: list[str] = []
-    if len(text) <= 4000:
-        chunks = [text]
-    else:
-        buf = []
-        size = 0
-        for block in text.split("\n\n"):
-            add = (2 if buf else 0) + len(block)
-            if size + add > 3900 and buf:
-                chunks.append("\n\n".join(buf))
-                buf, size = [block], len(block)
-            else:
-                buf.append(block)
-                size += add
-        if buf:
-            chunks.append("\n\n".join(buf))
+    chunks = split_message(text)
     for i, chunk in enumerate(chunks):
         payload = {
             "chat_id": chat_id,
@@ -875,7 +859,14 @@ def send_message(chat_id: str, text: str) -> list[int]:
         mid = (data.get("result") or {}).get("message_id")
         if mid is not None:
             ids.append(int(mid))
-        log.info("Mesaj gönderildi (%s/%s), message_id=%s, chat_id=%s", i + 1, len(chunks), mid, chat_id)
+        log.info(
+            "Mesaj gönderildi (%s/%s), message_id=%s, chat_id=%s, chars=%s",
+            i + 1,
+            len(chunks),
+            mid,
+            chat_id,
+            len(chunk),
+        )
     return ids
 
 
@@ -887,62 +878,126 @@ INSTRUMENT_PLAN = [
     {
         "key": "XAUUSD",
         "title": "XAUUSD",
+        "source": "yahoo",
         "tickers": ["GC=F"],
-        "source": "Yahoo GC=F (COMEX altın vadelisi; spot XAUUSD Yahoo'da yok)",
-        "show_dxy": True,
+        "note": "Yahoo GC=F (COMEX altın vadelisi)",
+        "informational": False,
         "move_threshold": 2.0,
         "utc": False,
     },
     {
         "key": "US100",
         "title": "US100",
+        "source": "yahoo",
         "tickers": ["NQ=F", "^NDX"],
-        "source": "Yahoo NQ=F (Nasdaq-100 vadelisi; yedek ^NDX nakit endeks)",
-        "show_dxy": False,
+        "note": "Yahoo NQ=F (Nasdaq-100 vadelisi; yedek ^NDX)",
+        "informational": False,
         "move_threshold": 2.0,
         "utc": False,
     },
     {
         "key": "EURUSD",
         "title": "EURUSD",
+        "source": "yahoo",
         "tickers": ["EURUSD=X"],
-        "source": "Yahoo EURUSD=X",
-        "show_dxy": True,
+        "note": "Yahoo EURUSD=X",
+        "informational": False,
+        "move_threshold": 2.0,
+        "utc": False,
+    },
+    {
+        "key": "DXY",
+        "title": "DXY",
+        "source": "yahoo",
+        "tickers": ["DX-Y.NYB"],
+        "note": "Yahoo DX-Y.NYB (dolar endeksi, işlem değil)",
+        "informational": True,
         "move_threshold": 2.0,
         "utc": False,
     },
     {
         "key": "BTC",
         "title": "BTC",
-        "tickers": [],
-        "source": "Hyperliquid mainnet /info candleSnapshot, coin BTC, interval 1d (UTC günü)",
-        "show_dxy": True,
+        "source": "hl",
+        "coin": "BTC",
+        "note": "Hyperliquid candleSnapshot 1d BTC (UTC)",
+        "informational": False,
+        "move_threshold": 4.0,
+        "utc": True,
+    },
+    {
+        "key": "ETH",
+        "title": "ETH",
+        "source": "hl",
+        "coin": "ETH",
+        "note": "Hyperliquid candleSnapshot 1d ETH (UTC)",
+        "informational": False,
+        "move_threshold": 4.0,
+        "utc": True,
+    },
+    {
+        "key": "XRP",
+        "title": "XRP",
+        "source": "hl",
+        "coin": "XRP",
+        "note": "Hyperliquid candleSnapshot 1d XRP (UTC)",
+        "informational": False,
+        "move_threshold": 4.0,
+        "utc": True,
+    },
+    {
+        "key": "DOGE",
+        "title": "DOGE",
+        "source": "hl",
+        "coin": "DOGE",
+        "note": "Hyperliquid candleSnapshot 1d DOGE (UTC)",
+        "informational": False,
         "move_threshold": 4.0,
         "utc": True,
     },
 ]
 
 
+def empty_result(plan: dict, error: str) -> InstrumentResult:
+    return InstrumentResult(
+        key=plan["key"],
+        title=plan["title"],
+        source_note=plan["note"],
+        informational=plan["informational"],
+        price=0.0,
+        change_pct=0.0,
+        move_threshold=plan["move_threshold"],
+        month_high=None,
+        month_low=None,
+        prev_month_high=None,
+        prev_month_low=None,
+        show_prev_month=False,
+        week_high=0,
+        week_low=0,
+        prev_high=0,
+        prev_low=0,
+        bias="BEKLE",
+        error=error,
+    )
+
+
 def load_instrument(plan: dict, asof: date) -> InstrumentResult:
     key = plan["key"]
     try:
-        used = ""
-        if key == "BTC":
-            bars = fetch_hl_btc_daily()
-            used = plan["source"]
+        if plan["source"] == "hl":
+            bars = fetch_hl_daily(plan["coin"])
+            used = plan["note"]
         else:
             last_err = None
             bars = None
+            used = plan["note"]
             for ticker in plan["tickers"]:
                 try:
                     bars = fetch_yahoo_daily(ticker)
-                    used = f"Yahoo {ticker}" + (
-                        "" if ticker == plan["tickers"][0] else f" (yedek; {plan['source']})"
-                    )
                     if ticker != plan["tickers"][0]:
                         used = f"Yahoo {ticker} (birincil {plan['tickers'][0]} alınamadı)"
                     else:
-                        used = plan["source"] if ticker in plan["source"] else f"Yahoo {ticker}"
+                        used = plan["note"]
                     break
                 except Exception as exc:
                     last_err = exc
@@ -955,34 +1010,13 @@ def load_instrument(plan: dict, asof: date) -> InstrumentResult:
             source_note=used,
             bars=bars,
             asof=asof,
-            show_dxy=plan["show_dxy"],
             move_threshold=plan["move_threshold"],
+            informational=plan["informational"],
             utc_session=plan["utc"],
         )
     except Exception as exc:
         log.exception("%s hesaplanamadı", key)
-        return InstrumentResult(
-            key=key,
-            title=plan["title"],
-            source_note=plan["source"],
-            show_dxy=plan["show_dxy"],
-            price=0.0,
-            change_pct=0.0,
-            move_threshold=plan["move_threshold"],
-            pivots=Pivots(0, 0, 0, 0, 0, 0, 0),
-            prev_high=0,
-            prev_low=0,
-            week_high=0,
-            week_low=0,
-            week_range="",
-            swing20_high=0,
-            swing20_low=0,
-            sma20=None,
-            sma50=None,
-            bias="BEKLE",
-            bias_reason="veri yok",
-            error=str(exc),
-        )
+        return empty_result(plan, str(exc))
 
 
 def run(dry_run: bool) -> int:
@@ -990,17 +1024,7 @@ def run(dry_run: bool) -> int:
     asof = generated_at.date()
     log.info("Hesaplama başladı (%s)", fmt_when(generated_at))
 
-    dxy_bars = None
-    dxy_err = None
-    try:
-        dxy_bars = fetch_yahoo_daily("DX-Y.NYB")
-    except Exception as exc:
-        dxy_err = str(exc)
-        log.warning("DXY alınamadı: %s", exc)
-    dxy_line = format_dxy_line(dxy_bars, dxy_err)
-
     events = fetch_calendar_high_usd_eur(asof)
-
     results = [load_instrument(plan, asof) for plan in INSTRUMENT_PLAN]
     ok = sum(1 for r in results if not r.error)
     if ok == 0:
@@ -1009,9 +1033,10 @@ def run(dry_run: bool) -> int:
             print("HATA: Hiçbir enstrüman verisi alınamadı.", file=sys.stderr)
         return 1
 
-    text = build_message(results, dxy_line, events, generated_at)
+    text = build_message(results, events, generated_at)
     print(text)
     print("", flush=True)
+    log.info("Mesaj uzunluğu: %s karakter, parça: %s", len(text), len(split_message(text)))
 
     if dry_run:
         log.info("Dry-run: Telegram'a gönderilmedi.")
@@ -1037,7 +1062,6 @@ def run(dry_run: bool) -> int:
         return 0
     except Exception as exc:
         log.error("Gönderim başarısız: %s", exc)
-        # fallback private chat only if we were targeting the group and it failed
         if str(chat_id) != FALLBACK_PRIVATE_CHAT_ID:
             log.info("Özel sohbete yedek gönderim deneniyor (%s)", FALLBACK_PRIVATE_CHAT_ID)
             try:
