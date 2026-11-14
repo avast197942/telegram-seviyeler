@@ -1,9 +1,9 @@
 name: Gunluk seviyeler
 
-# 09:00 ve 16:00 TSİ = 06:00 ve 13:00 UTC (Türkiye UTC+3, yaz/kış saati uygulanmaz)
+# Her 2 saatte bir (UTC çift saatler = TSİ 01,03,05...,23)
 on:
   schedule:
-    - cron: "0 6,13 * * 1-5"
+    - cron: "0 */2 * * *"
   workflow_dispatch:
 
 jobs:
