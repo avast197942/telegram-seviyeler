@@ -1,0 +1,29 @@
+name: Gunluk seviyeler
+
+# 09:00 ve 16:00 TSİ = 06:00 ve 13:00 UTC (Türkiye UTC+3, yaz/kış saati uygulanmaz)
+on:
+  schedule:
+    - cron: "0 6,13 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  send-levels:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Deposu al
+        uses: actions/checkout@v4
+
+      - name: Python kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Bağımlılıkları kur
+        run: pip install -r requirements.txt
+
+      - name: Seviyeleri hesapla ve Telegram'a gönder
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python levels_bot.py
